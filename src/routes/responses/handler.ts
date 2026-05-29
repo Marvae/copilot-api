@@ -32,7 +32,10 @@ import type {
   ResponsesTransport,
   ResponseStreamEvent,
 } from "~/lib/types/responses"
-import { createResponses as createCopilotResponses } from "~/services/copilot/create-responses"
+import {
+  buildResponsesWebSocketPayload,
+  createResponses as createCopilotResponses,
+} from "~/services/copilot/create-responses"
 
 import { handleResponsesViaMessages } from "./messages-handler"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
@@ -41,8 +44,10 @@ import {
   compactInputByLatestCompaction,
   getResponsesTransportForModel,
   getResponsesRequestOptions,
+  COPILOT_RESPONSES_PAYLOAD_LIMIT_BYTES,
   normalizeInputImageDetails,
   normalizeResponsesReasoningEffort,
+  sanitizeInputImagesForPayloadSize,
   sanitizeOversizedInputImages,
   sanitizeUnsupportedInputFields,
 } from "./utils"
@@ -193,11 +198,28 @@ export const handleResponses = async (c: Context) => {
     compactInputByLatestCompaction(payload)
   }
 
-  debugJson(logger, "Translated Responses payload:", payload)
-
   const { vision, initiator: inferredInitiator } =
     getResponsesRequestOptions(payload)
   const initiator = subagentMarker ? "agent" : inferredInitiator
+  let payloadSanitizedImageCount = 0
+  if (vision) {
+    const outboundPayload =
+      payload.stream === true && responsesTransport === "websocket" ?
+        buildResponsesWebSocketPayload(payload, initiator)
+      : { ...payload, service_tier: undefined }
+    payloadSanitizedImageCount = sanitizeInputImagesForPayloadSize(
+      payload,
+      COPILOT_RESPONSES_PAYLOAD_LIMIT_BYTES,
+      Buffer.byteLength(JSON.stringify(outboundPayload)),
+    )
+  }
+  if (payloadSanitizedImageCount > 0) {
+    logger.warn(
+      `Omitted ${payloadSanitizedImageCount} input image(s) to fit the Copilot Responses payload limit`,
+    )
+  }
+
+  debugJson(logger, "Translated Responses payload:", payload)
 
   const response = await responsesHandlerDependencies.createResponses(payload, {
     vision,

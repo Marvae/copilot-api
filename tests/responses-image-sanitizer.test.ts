@@ -8,8 +8,10 @@ import type {
 } from "~/lib/types/responses"
 
 import {
+  getResponsesRequestOptions,
   normalizeInputImageDetails,
   sanitizeAllInputImages,
+  sanitizeInputImagesForPayloadSize,
   sanitizeOversizedInputImages,
 } from "~/routes/responses/utils"
 
@@ -132,6 +134,8 @@ describe("sanitizeOversizedInputImages", () => {
       ],
       model: "gpt-test",
     } satisfies ResponsesPayload
+
+    expect(getResponsesRequestOptions(payload).vision).toBe(true)
 
     const sanitized = sanitizeOversizedInputImages(payload, 64)
 
@@ -265,5 +269,77 @@ describe("normalizeInputImageDetails", () => {
 
     expect(normalized).toBe(1)
     expect(toolOutputImage.detail).toBe("auto")
+  })
+})
+
+describe("sanitizeInputImagesForPayloadSize", () => {
+  test("replaces oldest images first until the request fits", () => {
+    const firstImageUrl = `data:image/png;base64,${"A".repeat(4096)}`
+    const secondImageUrl = `data:image/png;base64,${"B".repeat(4096)}`
+    const payload = {
+      input: [
+        {
+          content: [
+            { text: "look", type: "input_text" },
+            { detail: "low", image_url: firstImageUrl, type: "input_image" },
+            { detail: "low", image_url: secondImageUrl, type: "input_image" },
+          ],
+          role: "user",
+        },
+      ],
+      model: "gpt-test",
+    } as unknown as ResponsesPayload
+    const maxPayloadBytes = Buffer.byteLength(JSON.stringify(payload)) - 2000
+
+    const sanitized = sanitizeInputImagesForPayloadSize(
+      payload,
+      maxPayloadBytes,
+    )
+
+    expect(sanitized).toBe(1)
+    const payloadJson = JSON.stringify(payload)
+    expect(Buffer.byteLength(payloadJson)).toBeLessThanOrEqual(maxPayloadBytes)
+    expect(payloadJson).not.toContain(firstImageUrl)
+    expect(payloadJson).toContain(secondImageUrl)
+  })
+
+  test("keeps input images when the request is exactly at the payload limit", () => {
+    const imageUrl = imageDataUrl(4096)
+    const payload = makePayload(imageUrl)
+    const payloadBytes = Buffer.byteLength(JSON.stringify(payload))
+
+    const sanitized = sanitizeInputImagesForPayloadSize(payload, payloadBytes)
+
+    expect(sanitized).toBe(0)
+    expect(JSON.stringify(payload)).toContain(imageUrl)
+  })
+
+  test("accounts for transport envelope bytes", () => {
+    const imageUrl = imageDataUrl(4096)
+    const payload = makePayload(imageUrl)
+    const payloadBytes = Buffer.byteLength(JSON.stringify(payload))
+
+    const sanitized = sanitizeInputImagesForPayloadSize(
+      payload,
+      payloadBytes + 1024,
+      payloadBytes + 2048,
+    )
+
+    expect(sanitized).toBe(1)
+    expect(JSON.stringify(payload)).not.toContain(imageUrl)
+  })
+
+  test("does not replace an image when the placeholder would grow the request", () => {
+    const imageUrl = imageDataUrl(4)
+    const payload = makePayload(imageUrl)
+    const payloadBytes = Buffer.byteLength(JSON.stringify(payload))
+
+    const sanitized = sanitizeInputImagesForPayloadSize(
+      payload,
+      payloadBytes - 1,
+    )
+
+    expect(sanitized).toBe(0)
+    expect(JSON.stringify(payload)).toContain(imageUrl)
   })
 })

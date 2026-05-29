@@ -138,6 +138,8 @@ const REDACTED_IMAGE_PLACEHOLDER_DATA_URL =
     "ucSQ4s8JkKDDIYr3IuR8vEWgqroKP9b1bYKk2wfgeVmqATQLXdXamsXdEKkz3QXEEeTTuWWImMhW6qci94/+hwSVf99HqVoD",
     "OAuj2SEAAAAASUVORK5CYII=",
   ].join("")
+// CAPI Responses rejects HTTP bodies and WebSocket messages above 32 MiB.
+export const COPILOT_RESPONSES_PAYLOAD_LIMIT_BYTES = 32 * 1024 * 1024
 
 const COPILOT_UNSUPPORTED_INPUT_ITEM_FIELDS = [
   "internal_chat_message_metadata_passthrough",
@@ -219,6 +221,56 @@ export const normalizeInputImageDetails = (
 
   return normalizedCount
 }
+
+export const sanitizeInputImagesForPayloadSize = (
+  payload: ResponsesPayload,
+  maxPayloadBytes: number,
+  serializedPayloadBytes = getResponsesPayloadBytes(payload),
+): number => {
+  if (!Array.isArray(payload.input) || maxPayloadBytes <= 0) {
+    return 0
+  }
+
+  let payloadBytes = serializedPayloadBytes
+  if (payloadBytes <= maxPayloadBytes) {
+    return 0
+  }
+
+  let count = 0
+  // Preserve recent visual context by replacing images from oldest to newest.
+  for (const record of collectInputImages(payload.input)) {
+    const image = getInputImageDataUrl(record)
+    if (!image) {
+      continue
+    }
+
+    const placeholderRecord = { ...image.record }
+    replaceInputImageWithPlaceholder({
+      ...image,
+      record: placeholderRecord,
+    })
+    const removedBytes =
+      getJsonBytes(image.record) - getJsonBytes(placeholderRecord)
+    if (removedBytes <= 0) {
+      continue
+    }
+
+    replaceInputImageWithPlaceholder(image)
+    payloadBytes -= removedBytes
+    count += 1
+    if (payloadBytes <= maxPayloadBytes) {
+      break
+    }
+  }
+
+  return count
+}
+
+const getResponsesPayloadBytes = (payload: ResponsesPayload): number =>
+  getJsonBytes(payload)
+
+const getJsonBytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value))
 
 interface InputImageDataUrl {
   decodedBytes: number
@@ -523,7 +575,13 @@ const containsVisionContent = (value: unknown): boolean => {
   }
 
   if (Array.isArray(record.content)) {
-    return record.content.some((entry) => containsVisionContent(entry))
+    if (record.content.some((entry) => containsVisionContent(entry))) {
+      return true
+    }
+  }
+
+  if (Array.isArray(record.output)) {
+    return record.output.some((entry) => containsVisionContent(entry))
   }
 
   return false
